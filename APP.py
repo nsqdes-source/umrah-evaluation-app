@@ -6,6 +6,7 @@ import plotly.express as px
 import sqlite3
 import json
 from datetime import datetime
+import google.generativeai as genai
 
 # استدعاء دالة توليد الـ PDF
 from pdf_generator import generate_pdf_report
@@ -86,7 +87,7 @@ def calculate_umrah_company_score(data):
     total_departing = data.get("total_departing_pilgrims", 0) or 1
     p_enrichment = min(1.0, (data.get("enrichment_beneficiaries", 0) or 0) / total_departing) * 10.0
 
-    # مؤشر الالتزام بالخدمات والضوابط (تأثير المخالفات العادية على التقييم)
+    # مؤشر الالتزام بالخدمات والضوابط
     total_visited = data.get("total_visited_pilgrims", 0) or 0
     unaffected = data.get("unaffected_pilgrims", 0) or 0
     p_compliance = (unaffected / total_visited * 10.0) if total_visited > 0 else 10.0
@@ -121,7 +122,6 @@ def calculate_umrah_company_score(data):
     umrah_plus_points = (data.get("umrah_plus_beneficiaries", 0) or 0) * 2
     umrah_plus_incentive = min(10.0, (umrah_plus_points / 2000.0) * 10.0)
 
-    # جوائز الوزارة: نسبة مقطوعة ثابته (+5%) عند وجود جائزة
     award_incentive = 5.0 if data.get("has_ministry_award", False) else 0.0
 
     total_incentives = gift_incentive + umrah_plus_incentive + award_incentive
@@ -151,23 +151,23 @@ def calculate_umrah_company_score(data):
         "umrah_plus_incentive": round(umrah_plus_incentive, 2),
         "award_incentive": round(award_incentive, 2),
         "total_incentives": round(total_incentives, 2),
-        "incentives": round(total_incentives, 2),  # إضافة المفتاح المطلوب لتقرير PDF
+        "incentives": round(total_incentives, 2),
         "severe_violation_penalty": round(severe_violation_penalty, 2),
-        "penalties": round(severe_violation_penalty, 2),  # المفتاح المطلوب لتقرير PDF
+        "penalties": round(severe_violation_penalty, 2),
         "tier": tier,
         "raw_data": data
     }
 
 # ---------------------------------------------------------
-# 2. وكيل الذكاء الاصطناعي للاستشارات
+# 2. وكيل الذكاء الاصطناعي للاستشارات (عبر Google Gemini)
 # ---------------------------------------------------------
-def generate_ai_advisor_report(results, api_key=None):
+def generate_ai_advisor_report(results, api_key=None, language="العربية"):
     raw = results['raw_data']
     warnings = []
     actions = []
 
     if raw.get('has_severe_violation', False):
-        warnings.append("🚨 **خصم مباشر (-5%):** تم رصد مخالفة جسيمة خلال الشهر (مثل السكن غير المرخص أو عدم توفر تذاكر المغادرة).")
+        warnings.append("🚨 **خصم مباشر (-5%):** تم رصد مخالفة جسيمة خلال الشهر.")
     
     total_visited = raw.get('total_visited_pilgrims', 0) or 0
     unaffected = raw.get('unaffected_pilgrims', 0) or 0
@@ -180,19 +180,57 @@ def generate_ai_advisor_report(results, api_key=None):
         gain = round((pts_needed * 2 / 2000) * 10, 1)
         actions.append(f"💡 **تفعيل مبادرة (عمرة+):** تسجيل {pts_needed} معتمر إضافي يمنحك زيادة تحفيزية قدرها **+{gain}%**.")
 
-    if api_key:
+    if api_key and api_key.strip():
+        clean_key = api_key.strip()
         try:
-            import openai
-            openai.api_key = api_key
-            prompt = f"تحليل تقييم شركة عمرة: النتيجة {results['final_score']}% ({results['tier']}). قدم 3 توصيات تنفيذية."
-            res = openai.ChatCompletion.create(
-                model="gpt-4o-mini",
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=300
-            )
-            return res.choices[0].message.content
-        except Exception:
-            pass
+            genai.configure(api_key=clean_key)
+            
+            if language == "العربية":
+                prompt = f"""أنت مستشار تنفيذي متخصص في تقييم شركات العمرة. قم بتحليل بيانات الشركة التالية وتقديم 3 توصيات عمل استراتيجية لرفع تصنيفها:
+- النتيجة النهائية: {results['final_score']}%
+- التصنيف المستحق: {results['tier']}
+- محور تنوع الباقات: {results['score_packages']}/15
+- محور تجربة المعتمر والجودة: {results['score_exp']}/45
+- محور الالتزام بالبرنامج: {results['score_prog']}/40
+- مجموع المحفزات: +{results['total_incentives']}%
+- الخصومات المطبقة: -{results['penalties']}%
+
+تعليمات صارمة: يجب أن تكون الإجابة والتحليل والتوصيات بالكامل باللغة العربية فقط، واستخدم أسلوباً استشارياً راقياً ومباشراً."""
+            else:
+                prompt = f"""You are an executive consultant specializing in evaluating Umrah companies. Analyze the following company data and provide 3 strategic business recommendations to improve its performance:
+- Final Score: {results['final_score']}%
+- Current Tier: {results['tier']}
+- Package Diversity Pillar: {results['score_packages']}/15
+- Pilgrim Experience & Quality Pillar: {results['score_exp']}/45
+- Program Commitment Pillar: {results['score_prog']}/40
+- Total Incentives: +{results['total_incentives']}%
+- Applied Penalties: -{results['penalties']}%
+
+CRITICAL INSTRUCTION: The full analysis and all recommendations MUST be strictly in English."""
+
+            candidate_models = [
+                'gemini-1.5-flash',
+                'gemini-2.0-flash',
+                'gemini-1.5-pro',
+                'models/gemini-1.5-flash'
+            ]
+
+            spinner_msg = "🤖 جاري تحليل البيانات وإعداد التوصيات..." if language == "العربية" else "🤖 Generating AI analysis..."
+            
+            with st.spinner(spinner_msg):
+                for model_name in candidate_models:
+                    try:
+                        model = genai.GenerativeModel(model_name)
+                        response = model.generate_content(prompt)
+                        if response and response.text:
+                            header = "### 🤖 تحليل ومقترحات الذكاء الاصطناعي (Gemini):" if language == "العربية" else "### 🤖 AI Advisor Analysis & Recommendations (Gemini):"
+                            return f"{header}\n\n{response.text}"
+                    except Exception:
+                        continue
+            
+            st.warning("⚠️ تعذر الحصول على رد من نماذج Gemini. تم عرض التقرير الأساسي التلقائي.")
+        except Exception as e:
+            st.error(f"حدث خطأ أثناء الاتصال بمفتاح Gemini: {e}")
 
     report = "### 🤖 تقرير وكيل الذكاء الاصطناعي للاستشارات\n\n"
     if warnings:
@@ -262,40 +300,38 @@ with tab1:
     
     st.sidebar.header("⚙️ الخيارات والإعدادات")
     input_mode = st.sidebar.radio("طريقة إدخال البيانات:", ["إدخال يدوي (Manual)", "استيراد ملف Excel"])
-    openai_key = st.sidebar.text_input("مفتاح OpenAI API (اختياري):", type="password")
+    gemini_key = st.sidebar.text_input("مفتاح Gemini API - اختياري", type="password")
+    ai_language = st.sidebar.selectbox("لغة تقرير الذكاء الاصطناعي:", ["العربية", "English"])
 
     data = {}
 
     if input_mode == "إدخال يدوي (Manual)":
         col1, col2, col3 = st.columns(3)
         
-        # العمود الأول: تنوع الباقات والمحفزات
         with col1:
             st.markdown("### 1️⃣ تنوع الباقات (15%)")
             
             col_lux_in, col_lux_out = st.columns([3, 2])
             with col_lux_in:
-                luxury_pilgrims = st.number_input("عدد الباقات الفاخرة", min_value=0, value=None, placeholder="0", step=1, key="in_lux_pax")
+                luxury_pilgrims = st.number_input("عدد الباقات الفاخرة", min_value=0, value=0, step=1, key="in_lux_pax")
 
             col_mid_in, col_mid_out = st.columns([3, 2])
             with col_mid_in:
-                medium_pilgrims = st.number_input("عدد الباقات المتوسطة", min_value=0, value=None, placeholder="0", step=1, key="in_mid_pax")
+                medium_pilgrims = st.number_input("عدد الباقات المتوسطة", min_value=0, value=0, step=1, key="in_mid_pax")
 
             col_eco_in, col_eco_out = st.columns([3, 2])
             with col_eco_in:
-                economy_pilgrims = st.number_input("عدد الباقات الاقتصادية", min_value=0, value=None, placeholder="0", step=1, key="in_eco_pax")
+                economy_pilgrims = st.number_input("عدد الباقات الاقتصادية", min_value=0, value=0, step=1, key="in_eco_pax")
 
-            # الحساب التلقائي لإجمالي الباقات والنسب
-            v_lux = luxury_pilgrims if luxury_pilgrims is not None else 0
-            v_mid = medium_pilgrims if medium_pilgrims is not None else 0
-            v_eco = economy_pilgrims if economy_pilgrims is not None else 0
+            v_lux = int(luxury_pilgrims)
+            v_mid = int(medium_pilgrims)
+            v_eco = int(economy_pilgrims)
             total_entry_pilgrims = v_lux + v_mid + v_eco
 
             p_lux_pct = (v_lux / total_entry_pilgrims * 100.0) if total_entry_pilgrims > 0 else 0.0
             p_mid_pct = (v_mid / total_entry_pilgrims * 100.0) if total_entry_pilgrims > 0 else 0.0
             p_eco_pct = (v_eco / total_entry_pilgrims * 100.0) if total_entry_pilgrims > 0 else 0.0
 
-            # عرض النسب بجانب كل خانة
             with col_lux_out:
                 st.markdown("<br>", unsafe_allow_html=True)
                 st.caption(f"النسبة: **{p_lux_pct:.1f}%**")
@@ -315,27 +351,25 @@ with tab1:
             
             col_g_lux_in, col_g_lux_out = st.columns([3, 2])
             with col_g_lux_in:
-                luxury_gifts = st.number_input("عدد الهدايا الفاخرة (20 نقطة)", min_value=0, value=None, placeholder="0", step=1, key="in_g_lux")
+                luxury_gifts = st.number_input("عدد الهدايا الفاخرة (20 نقطة)", min_value=0, value=0, step=1, key="in_g_lux")
 
             col_g_mid_in, col_g_mid_out = st.columns([3, 2])
             with col_g_mid_in:
-                medium_gifts = st.number_input("عدد الهدايا المتوسطة (4 نقاط)", min_value=0, value=None, placeholder="0", step=1, key="in_g_mid")
+                medium_gifts = st.number_input("عدد الهدايا المتوسطة (4 نقاط)", min_value=0, value=0, step=1, key="in_g_mid")
 
             col_g_eco_in, col_g_eco_out = st.columns([3, 2])
             with col_g_eco_in:
-                economy_gifts = st.number_input("عدد الهدايا الاقتصادية (1 نقطة)", min_value=0, value=None, placeholder="0", step=1, key="in_g_eco")
+                economy_gifts = st.number_input("عدد الهدايا الاقتصادية (1 نقطة)", min_value=0, value=0, step=1, key="in_g_eco")
 
-            # الحساب التلقائي لإجمالي الهدايا والنسب
-            v_g_lux = luxury_gifts if luxury_gifts is not None else 0
-            v_g_mid = medium_gifts if medium_gifts is not None else 0
-            v_g_eco = economy_gifts if economy_gifts is not None else 0
+            v_g_lux = int(luxury_gifts)
+            v_g_mid = int(medium_gifts)
+            v_g_eco = int(economy_gifts)
             total_gifts = v_g_lux + v_g_mid + v_g_eco
 
             g_lux_pct = (v_g_lux / total_gifts * 100.0) if total_gifts > 0 else 0.0
             g_mid_pct = (v_g_mid / total_gifts * 100.0) if total_gifts > 0 else 0.0
             g_eco_pct = (v_g_eco / total_gifts * 100.0) if total_gifts > 0 else 0.0
 
-            # عرض النسب بجانب كل خانة
             with col_g_lux_out:
                 st.markdown("<br>", unsafe_allow_html=True)
                 st.caption(f"النسبة: **{g_lux_pct:.1f}%**")
@@ -350,45 +384,43 @@ with tab1:
 
             st.text_input("إجمالي عدد الهدايا (تلقائي)", value=f"{total_gifts} هدية", disabled=True)
 
-            umrah_plus_beneficiaries = st.number_input("معتمري مبادرة (عمرة+)", min_value=0, value=None, placeholder="0", key="in_umrah_plus")
+            umrah_plus_beneficiaries = st.number_input("معتمري مبادرة (عمرة+)", min_value=0, value=0, step=1, key="in_umrah_plus")
             has_ministry_award = st.checkbox("حاصل على جائزة من الوزارة (+5%)", key="in_has_award")
 
-        # العمود الثاني: تجربة المعتمر والجودة والمخالفات
         with col2:
             st.markdown("### 2️⃣ تجربة المعتمر والجودة (45%)")
             
-            satisfaction_score_pct = st.number_input("رضا المعتمرين (%)", 0.0, 100.0, value=None, placeholder="0", step=1.0, key="in_sat")
-            service_quality_pct = st.number_input("تقييم جودة الخدمة (%)", 0.0, 100.0, value=None, placeholder="0", step=1.0, key="in_qual")
+            satisfaction_score_pct = st.number_input("رضا المعتمرين (%)", min_value=0.0, max_value=100.0, value=0.0, step=1.0, key="in_sat")
+            service_quality_pct = st.number_input("تقييم جودة الخدمة (%)", min_value=0.0, max_value=100.0, value=0.0, step=1.0, key="in_qual")
 
             st.caption("معالجة الشكاوى والبلاغات:")
-            total_complaints = st.number_input("إجمالي البلاغات الواردة", min_value=0, value=None, placeholder="0", key="in_tot_comp")
-            closed_complaints = st.number_input("البلاغات المعالجة وفق SLA", min_value=0, value=None, placeholder="0", key="in_cls_comp")
+            total_complaints = st.number_input("إجمالي البلاغات الواردة", min_value=0, value=0, step=1, key="in_tot_comp")
+            closed_complaints = st.number_input("البلاغات المعالجة وفق SLA", min_value=0, value=0, step=1, key="in_cls_comp")
 
-            total_departing_pilgrims = st.number_input("إجمالي المعتمرين المغادرين", min_value=0, value=None, placeholder="0", key="in_tot_dep")
-            enrichment_beneficiaries = st.number_input("المستفيدون من الخدمات الإثرائية", min_value=0, value=None, placeholder="0", key="in_enrich")
+            total_departing_pilgrims = st.number_input("إجمالي المعتمرين المغادرين", min_value=0, value=0, step=1, key="in_tot_dep")
+            enrichment_beneficiaries = st.number_input("المستفيدون من الخدمات الإثرائية", min_value=0, value=0, step=1, key="in_enrich")
 
             st.markdown("---")
             st.markdown("### ⚠️ المخالفات والامتثال")
-            total_visited_pilgrims = st.number_input("إجمالي المعتمرين في الزيارات الميدانية", min_value=0, value=None, placeholder="0", key="in_tot_vis")
-            unaffected_pilgrims = st.number_input("عدد المعتمرين غير المتأثرين بمخالفات", min_value=0, value=None, placeholder="0", key="in_unaff_pax")
+            total_visited_pilgrims = st.number_input("إجمالي المعتمرين في الزيارات الميدانية", min_value=0, value=0, step=1, key="in_tot_vis")
+            unaffected_pilgrims = st.number_input("عدد المعتمرين غير المتأثرين بمخالفات", min_value=0, value=0, step=1, key="in_unaff_pax")
             has_severe_violation = st.checkbox("رصد مخالفة جسيمة خلال الشهر (-5%)", key="in_severe_viol")
 
-        # العمود الثالث: الالتزام بالبرنامج
         with col3:
             st.markdown("### 3️⃣ الالتزام بالبرنامج (40%)")
 
-            total_entry_records = st.number_input("إجمالي سجلات القدوم", min_value=0, value=None, placeholder="0", key="in_tot_ent_rec")
-            matched_entry_records = st.number_input("سجلات القدوم المتطابقة", min_value=0, value=None, placeholder="0", key="in_mtch_ent_rec")
+            total_entry_records = st.number_input("إجمالي سجلات القدوم", min_value=0, value=0, step=1, key="in_tot_ent_rec")
+            matched_entry_records = st.number_input("سجلات القدوم المتطابقة", min_value=0, value=0, step=1, key="in_mtch_ent_rec")
 
-            arrival_boarding_orders = st.number_input("أوامر إركاب الوصول الصادرة", min_value=0, value=None, placeholder="0", key="in_arr_board")
-            intercity_boarding_orders = st.number_input("أوامر إركاب بين المدن الصادرة", min_value=0, value=None, placeholder="0", key="in_inter_board")
-            departure_boarding_orders = st.number_input("أوامر إركاب المغادرة الصادرة", min_value=0, value=None, placeholder="0", key="in_dep_board")
+            arrival_boarding_orders = st.number_input("أوامر إركاب الوصول الصادرة", min_value=0, value=0, step=1, key="in_arr_board")
+            intercity_boarding_orders = st.number_input("أوامر إركاب بين المدن الصادرة", min_value=0, value=0, step=1, key="in_inter_board")
+            departure_boarding_orders = st.number_input("أوامر إركاب المغادرة الصادرة", min_value=0, value=0, step=1, key="in_dep_board")
 
-            total_exit_records = st.number_input("إجمالي سجلات المغادرة", min_value=0, value=None, placeholder="0", key="in_tot_ext_rec")
-            matched_exit_records = st.number_input("سجلات المغادرة المتطابقة", min_value=0, value=None, placeholder="0", key="in_mtch_ext_rec")
+            total_exit_records = st.number_input("إجمالي سجلات المغادرة", min_value=0, value=0, step=1, key="in_tot_ext_rec")
+            matched_exit_records = st.number_input("سجلات المغادرة المتطابقة", min_value=0, value=0, step=1, key="in_mtch_ext_rec")
 
-            total_housing_programs = st.number_input("إجمالي برامج العمرة مع السكن", min_value=0, value=None, placeholder="0", key="in_tot_hsg")
-            confirmed_housing = st.number_input("المؤكد سكنهم إلكترونياً عند الوصول", min_value=0, value=None, placeholder="0", key="in_cnfm_hsg")
+            total_housing_programs = st.number_input("إجمالي برامج العمرة مع السكن", min_value=0, value=0, step=1, key="in_tot_hsg")
+            confirmed_housing = st.number_input("المؤكد سكنهم إلكترونياً عند الوصول", min_value=0, value=0, step=1, key="in_cnfm_hsg")
 
     else:
         uploaded_file = st.file_uploader("رفع ملف Excel:", type=['xlsx', 'csv'])
@@ -433,22 +465,8 @@ with tab1:
         results = calculate_umrah_company_score(data)
         save_evaluation(company_name, results)
 
-        # حفظ النتيجة في الجلسة لعرضها بعد إعادة التحميل
         st.session_state['latest_results'] = results
         st.session_state['latest_company'] = company_name
-
-        # تفريغ جميع خانات الإدخال تلقائياً
-        keys_to_clear = [
-            'in_lux_pax', 'in_mid_pax', 'in_eco_pax',
-            'in_g_eco', 'in_g_mid', 'in_g_lux', 'in_umrah_plus', 'in_has_award',
-            'in_sat', 'in_qual', 'in_tot_comp', 'in_cls_comp',
-            'in_tot_dep', 'in_enrich', 'in_tot_vis', 'in_unaff_pax', 'in_severe_viol',
-            'in_tot_ent_rec', 'in_mtch_ent_rec', 'in_arr_board', 'in_inter_board',
-            'in_dep_board', 'in_tot_ext_rec', 'in_mtch_ext_rec', 'in_tot_hsg', 'in_cnfm_hsg'
-        ]
-        for k in keys_to_clear:
-            if k in st.session_state:
-                del st.session_state[k]
 
         st.rerun()
 
@@ -468,7 +486,7 @@ with tab1:
         render_charts(results)
         st.markdown("---")
         
-        ai_report = generate_ai_advisor_report(results, openai_key)
+        ai_report = generate_ai_advisor_report(results, gemini_key, ai_language)
         st.markdown(ai_report)
 
         pdf_bytes = generate_pdf_report(comp_name, results)
