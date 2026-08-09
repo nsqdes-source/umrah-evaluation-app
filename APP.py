@@ -9,10 +9,14 @@ from datetime import datetime
 import google.generativeai as genai
 
 # استدعاء دالة توليد الـ PDF
-from pdf_generator import generate_pdf_report
+try:
+    from pdf_generator import generate_pdf_report
+except ImportError:
+    def generate_pdf_report(company_name, results):
+        return b"PDF Generator Module Not Found"
 
 # ---------------------------------------------------------
-# 0. إعدادات الصفحة وقاعدة البيانات
+# 0. إعدادات الصفحة وقاعدة البيانات (تحسين: استخدام إدارة السياق Context Managers)
 # ---------------------------------------------------------
 st.set_page_config(
     page_title="نظام إدارة وتصنيف شركات العمرة 1448هـ",
@@ -20,48 +24,50 @@ st.set_page_config(
     layout="wide"
 )
 
+DB_NAME = "umrah_evaluations.db"
+
 def init_db():
-    conn = sqlite3.connect("umrah_evaluations.db")
-    c = conn.cursor()
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS evaluations (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            eval_date TEXT,
-            company_name TEXT,
-            final_score REAL,
-            tier TEXT,
-            score_packages REAL,
-            score_exp REAL,
-            score_prog REAL,
-            incentives REAL,
-            penalties REAL,
-            raw_json TEXT
-        )
-    ''')
-    conn.commit()
-    conn.close()
+    """إنشاء جدول التقييمات بأمان داخل سياق موحد."""
+    with sqlite3.connect(DB_NAME) as conn:
+        c = conn.cursor()
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS evaluations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                eval_date TEXT,
+                company_name TEXT,
+                final_score REAL,
+                tier TEXT,
+                score_packages REAL,
+                score_exp REAL,
+                score_prog REAL,
+                incentives REAL,
+                penalties REAL,
+                raw_json TEXT
+            )
+        ''')
+        conn.commit()
 
 def save_evaluation(company_name, results):
-    conn = sqlite3.connect("umrah_evaluations.db")
-    c = conn.cursor()
-    c.execute('''
-        INSERT INTO evaluations 
-        (eval_date, company_name, final_score, tier, score_packages, score_exp, score_prog, incentives, penalties, raw_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (
-        datetime.now().strftime("%Y-%m-%d %H:%M"),
-        company_name,
-        results['final_score'],
-        results['tier'],
-        results['score_packages'],
-        results['score_exp'],
-        results['score_prog'],
-        results['total_incentives'],
-        results['penalties'],
-        json.dumps(results['raw_data'])
-    ))
-    conn.commit()
-    conn.close()
+    """حفظ نتيجة التقييم في قاعدة البيانات بأمان."""
+    with sqlite3.connect(DB_NAME) as conn:
+        c = conn.cursor()
+        c.execute('''
+            INSERT INTO evaluations 
+            (eval_date, company_name, final_score, tier, score_packages, score_exp, score_prog, incentives, penalties, raw_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            datetime.now().strftime("%Y-%m-%d %H:%M"),
+            company_name,
+            results['final_score'],
+            results['tier'],
+            results['score_packages'],
+            results['score_exp'],
+            results['score_prog'],
+            results['total_incentives'],
+            results['penalties'],
+            json.dumps(results['raw_data'], ensure_ascii=False)
+        ))
+        conn.commit()
 
 init_db()
 
@@ -208,11 +214,11 @@ def generate_ai_advisor_report(results, api_key=None, language="العربية")
 
 CRITICAL INSTRUCTION: The full analysis and all recommendations MUST be strictly in English."""
 
+            # تحديث النماذج لتشمل النماذج المستقرة والحديثة
             candidate_models = [
                 'gemini-1.5-flash',
                 'gemini-2.0-flash',
-                'gemini-1.5-pro',
-                'models/gemini-1.5-flash'
+                'gemini-1.5-pro'
             ]
 
             spinner_msg = "🤖 جاري تحليل البيانات وإعداد التوصيات..." if language == "العربية" else "🤖 Generating AI analysis..."
@@ -263,7 +269,7 @@ def render_charts(results):
             }
         ))
         fig_gauge.update_layout(height=300)
-        st.plotly_chart(fig_gauge, width="stretch")
+        st.plotly_chart(fig_gauge, use_container_width=True)
 
     with c2:
         categories = ['تنوع الباقات', 'تجربة المعتمر والجودة', 'الالتزام بالبرنامج']
@@ -286,7 +292,7 @@ def render_charts(results):
             title="نسبة الإنجاز حسب المحاور الرئيسية",
             height=300
         )
-        st.plotly_chart(fig_radar, width="stretch")
+        st.plotly_chart(fig_radar, use_container_width=True)
 
 # ---------------------------------------------------------
 # 4. واجهة المستخدم الرئيسية
@@ -296,100 +302,36 @@ st.title("🕋 نظام إدارة وتصنيف شركات العمرة 1448هـ
 tab1, tab2 = st.tabs(["📊 إجراء التقييم الحالية", "📜 سجل التقييمات التاريخية"])
 
 with tab1:
-    company_name = st.text_input("اسم الشركة / الرخصة:", "شركة عمرة النموذجية")
-    
     st.sidebar.header("⚙️ الخيارات والإعدادات")
-    input_mode = st.sidebar.radio("طريقة إدخال البيانات:", ["إدخال يدوي (Manual)", "استيراد ملف Excel"])
+    input_mode = st.sidebar.radio("طريقة إدخال البيانات:", ["إدخال يدوي (Manual)", "استيراد ملف Excel / CSV مجمع"])
     gemini_key = st.sidebar.text_input("مفتاح Gemini API - اختياري", type="password")
     ai_language = st.sidebar.selectbox("لغة تقرير الذكاء الاصطناعي:", ["العربية", "English"])
 
-    data = {}
-
     if input_mode == "إدخال يدوي (Manual)":
+        company_name = st.text_input("اسم الشركة / الرخصة:", "شركة عمرة النموذجية")
         col1, col2, col3 = st.columns(3)
         
         with col1:
             st.markdown("### 1️⃣ تنوع الباقات (15%)")
-            
-            col_lux_in, col_lux_out = st.columns([3, 2])
-            with col_lux_in:
-                luxury_pilgrims = st.number_input("عدد الباقات الفاخرة", min_value=0, value=0, step=1, key="in_lux_pax")
+            luxury_pilgrims = st.number_input("عدد الباقات الفاخرة", min_value=0, value=0, step=1, key="in_lux_pax")
+            medium_pilgrims = st.number_input("عدد الباقات المتوسطة", min_value=0, value=0, step=1, key="in_mid_pax")
+            economy_pilgrims = st.number_input("عدد الباقات الاقتصادية", min_value=0, value=0, step=1, key="in_eco_pax")
 
-            col_mid_in, col_mid_out = st.columns([3, 2])
-            with col_mid_in:
-                medium_pilgrims = st.number_input("عدد الباقات المتوسطة", min_value=0, value=0, step=1, key="in_mid_pax")
-
-            col_eco_in, col_eco_out = st.columns([3, 2])
-            with col_eco_in:
-                economy_pilgrims = st.number_input("عدد الباقات الاقتصادية", min_value=0, value=0, step=1, key="in_eco_pax")
-
-            v_lux = int(luxury_pilgrims)
-            v_mid = int(medium_pilgrims)
-            v_eco = int(economy_pilgrims)
+            v_lux, v_mid, v_eco = int(luxury_pilgrims), int(medium_pilgrims), int(economy_pilgrims)
             total_entry_pilgrims = v_lux + v_mid + v_eco
-
-            p_lux_pct = (v_lux / total_entry_pilgrims * 100.0) if total_entry_pilgrims > 0 else 0.0
-            p_mid_pct = (v_mid / total_entry_pilgrims * 100.0) if total_entry_pilgrims > 0 else 0.0
-            p_eco_pct = (v_eco / total_entry_pilgrims * 100.0) if total_entry_pilgrims > 0 else 0.0
-
-            with col_lux_out:
-                st.markdown("<br>", unsafe_allow_html=True)
-                st.caption(f"النسبة: **{p_lux_pct:.1f}%**")
-
-            with col_mid_out:
-                st.markdown("<br>", unsafe_allow_html=True)
-                st.caption(f"النسبة: **{p_mid_pct:.1f}%**")
-
-            with col_eco_out:
-                st.markdown("<br>", unsafe_allow_html=True)
-                st.caption(f"النسبة: **{p_eco_pct:.1f}%**")
-
-            st.text_input("إجمالي عدد الباقات (تلقائي)", value=f"{total_entry_pilgrims} باقة", disabled=True)
+            st.caption(f"إجمالي عدد الباقات: **{total_entry_pilgrims}**")
 
             st.markdown("---")
             st.markdown("### 🎁 المحفزات والجوائز")
+            luxury_gifts = st.number_input("عدد الهدايا الفاخرة (20 نقطة)", min_value=0, value=0, step=1, key="in_g_lux")
+            medium_gifts = st.number_input("عدد الهدايا المتوسطة (4 نقاط)", min_value=0, value=0, step=1, key="in_g_mid")
+            economy_gifts = st.number_input("عدد الهدايا الاقتصادية (1 نقطة)", min_value=0, value=0, step=1, key="in_g_eco")
             
-            col_g_lux_in, col_g_lux_out = st.columns([3, 2])
-            with col_g_lux_in:
-                luxury_gifts = st.number_input("عدد الهدايا الفاخرة (20 نقطة)", min_value=0, value=0, step=1, key="in_g_lux")
-
-            col_g_mid_in, col_g_mid_out = st.columns([3, 2])
-            with col_g_mid_in:
-                medium_gifts = st.number_input("عدد الهدايا المتوسطة (4 نقاط)", min_value=0, value=0, step=1, key="in_g_mid")
-
-            col_g_eco_in, col_g_eco_out = st.columns([3, 2])
-            with col_g_eco_in:
-                economy_gifts = st.number_input("عدد الهدايا الاقتصادية (1 نقطة)", min_value=0, value=0, step=1, key="in_g_eco")
-
-            v_g_lux = int(luxury_gifts)
-            v_g_mid = int(medium_gifts)
-            v_g_eco = int(economy_gifts)
-            total_gifts = v_g_lux + v_g_mid + v_g_eco
-
-            g_lux_pct = (v_g_lux / total_gifts * 100.0) if total_gifts > 0 else 0.0
-            g_mid_pct = (v_g_mid / total_gifts * 100.0) if total_gifts > 0 else 0.0
-            g_eco_pct = (v_g_eco / total_gifts * 100.0) if total_gifts > 0 else 0.0
-
-            with col_g_lux_out:
-                st.markdown("<br>", unsafe_allow_html=True)
-                st.caption(f"النسبة: **{g_lux_pct:.1f}%**")
-
-            with col_g_mid_out:
-                st.markdown("<br>", unsafe_allow_html=True)
-                st.caption(f"النسبة: **{g_mid_pct:.1f}%**")
-
-            with col_g_eco_out:
-                st.markdown("<br>", unsafe_allow_html=True)
-                st.caption(f"النسبة: **{g_eco_pct:.1f}%**")
-
-            st.text_input("إجمالي عدد الهدايا (تلقائي)", value=f"{total_gifts} هدية", disabled=True)
-
             umrah_plus_beneficiaries = st.number_input("معتمري مبادرة (عمرة+)", min_value=0, value=0, step=1, key="in_umrah_plus")
             has_ministry_award = st.checkbox("حاصل على جائزة من الوزارة (+5%)", key="in_has_award")
 
         with col2:
             st.markdown("### 2️⃣ تجربة المعتمر والجودة (45%)")
-            
             satisfaction_score_pct = st.number_input("رضا المعتمرين (%)", min_value=0.0, max_value=100.0, value=0.0, step=1.0, key="in_sat")
             service_quality_pct = st.number_input("تقييم جودة الخدمة (%)", min_value=0.0, max_value=100.0, value=0.0, step=1.0, key="in_qual")
 
@@ -408,7 +350,6 @@ with tab1:
 
         with col3:
             st.markdown("### 3️⃣ الالتزام بالبرنامج (40%)")
-
             total_entry_records = st.number_input("إجمالي سجلات القدوم", min_value=0, value=0, step=1, key="in_tot_ent_rec")
             matched_entry_records = st.number_input("سجلات القدوم المتطابقة", min_value=0, value=0, step=1, key="in_mtch_ent_rec")
 
@@ -422,53 +363,64 @@ with tab1:
             total_housing_programs = st.number_input("إجمالي برامج العمرة مع السكن", min_value=0, value=0, step=1, key="in_tot_hsg")
             confirmed_housing = st.number_input("المؤكد سكنهم إلكترونياً عند الوصول", min_value=0, value=0, step=1, key="in_cnfm_hsg")
 
-    else:
-        uploaded_file = st.file_uploader("رفع ملف Excel:", type=['xlsx', 'csv'])
-        if uploaded_file:
-            df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
-            data = df.iloc[0].to_dict()
-        else:
-            st.stop()
-
-    if st.button("🚀 احتساب التقييم وحفظ النتيجة", type="primary"):
-        if input_mode == "إدخال يدوي (Manual)":
+        if st.button("🚀 احتساب التقييم وحفظ النتيجة", type="primary"):
             data = {
                 'total_entry_pilgrims': total_entry_pilgrims,
                 'luxury_pilgrims': v_lux,
                 'medium_pilgrims': v_mid,
                 'economy_pilgrims': v_eco,
-                'economy_gifts': v_g_eco,
-                'medium_gifts': v_g_mid,
-                'luxury_gifts': v_g_lux,
-                'umrah_plus_beneficiaries': umrah_plus_beneficiaries,
+                'economy_gifts': int(economy_gifts),
+                'medium_gifts': int(medium_gifts),
+                'luxury_gifts': int(luxury_gifts),
+                'umrah_plus_beneficiaries': int(umrah_plus_beneficiaries),
                 'has_ministry_award': has_ministry_award,
                 'satisfaction_score_pct': satisfaction_score_pct,
                 'service_quality_pct': service_quality_pct,
-                'total_complaints': total_complaints,
-                'closed_complaints': closed_complaints,
-                'total_departing_pilgrims': total_departing_pilgrims,
-                'enrichment_beneficiaries': enrichment_beneficiaries,
-                'total_visited_pilgrims': total_visited_pilgrims,
-                'unaffected_pilgrims': unaffected_pilgrims,
+                'total_complaints': int(total_complaints),
+                'closed_complaints': int(closed_complaints),
+                'total_departing_pilgrims': int(total_departing_pilgrims),
+                'enrichment_beneficiaries': int(enrichment_beneficiaries),
+                'total_visited_pilgrims': int(total_visited_pilgrims),
+                'unaffected_pilgrims': int(unaffected_pilgrims),
                 'has_severe_violation': has_severe_violation,
-                'total_entry_records': total_entry_records,
-                'matched_entry_records': matched_entry_records,
-                'arrival_boarding_orders': arrival_boarding_orders,
-                'intercity_boarding_orders': intercity_boarding_orders,
-                'departure_boarding_orders': departure_boarding_orders,
-                'total_exit_records': total_exit_records,
-                'matched_exit_records': matched_exit_records,
-                'total_housing_programs': total_housing_programs,
-                'confirmed_housing': confirmed_housing
+                'total_entry_records': int(total_entry_records),
+                'matched_entry_records': int(matched_entry_records),
+                'arrival_boarding_orders': int(arrival_boarding_orders),
+                'intercity_boarding_orders': int(intercity_boarding_orders),
+                'departure_boarding_orders': int(departure_boarding_orders),
+                'total_exit_records': int(total_exit_records),
+                'matched_exit_records': int(matched_exit_records),
+                'total_housing_programs': int(total_housing_programs),
+                'confirmed_housing': int(confirmed_housing)
             }
 
-        results = calculate_umrah_company_score(data)
-        save_evaluation(company_name, results)
+            results = calculate_umrah_company_score(data)
+            save_evaluation(company_name, results)
 
-        st.session_state['latest_results'] = results
-        st.session_state['latest_company'] = company_name
+            st.session_state['latest_results'] = results
+            st.session_state['latest_company'] = company_name
+            st.rerun()
 
-        st.rerun()
+    else:
+        # تحسين: معالجة الملفات المجمعة (Batch Processing)
+        st.subheader("📂 معالجة التقييمات المجمعة عبر الملفات")
+        uploaded_file = st.file_uploader("رفع ملف Excel أو CSV يحتوي بيانات الشركات:", type=['xlsx', 'csv'])
+        
+        if uploaded_file:
+            df_upload = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
+            st.write("📋 **معاينة البيانات المرفوعة:**", df_upload.head())
+
+            if st.button("⚡ تقييم وحفظ كافة الشركات في الملف"):
+                processed_count = 0
+                for idx, row in df_upload.iterrows():
+                    comp_name = row.get("company_name", f"شركة_{idx+1}")
+                    row_data = row.to_dict()
+                    results = calculate_umrah_company_score(row_data)
+                    save_evaluation(comp_name, results)
+                    processed_count += 1
+                
+                st.success(f"✅ تم تقييم وحفظ {processed_count} شركة بنجاح في قاعدة البيانات!")
+                st.rerun()
 
     # عرض نتائج التقييم الأخير والتقرير
     if 'latest_results' in st.session_state and st.session_state['latest_results']:
@@ -496,18 +448,17 @@ with tab1:
             data=pdf_bytes,
             file_name=f"تقرير_تقييم_{comp_name}.pdf",
             mime="application/pdf",
-            width="stretch"
+            use_container_width=True
         )
 
 with tab2:
     st.subheader("📜 السجل التاريخي لتقييمات الشركات")
-    conn = sqlite3.connect("umrah_evaluations.db")
-    df_history = pd.read_sql_query("SELECT id, eval_date, company_name, final_score, tier, score_packages, score_exp, score_prog, incentives, penalties FROM evaluations ORDER BY id DESC", conn)
-    conn.close()
+    with sqlite3.connect(DB_NAME) as conn:
+        df_history = pd.read_sql_query("SELECT id, eval_date, company_name, final_score, tier, score_packages, score_exp, score_prog, incentives, penalties FROM evaluations ORDER BY id DESC", conn)
 
     if not df_history.empty:
-        st.dataframe(df_history, width="stretch")
+        st.dataframe(df_history, use_container_width=True)
         fig_history = px.line(df_history, x="eval_date", y="final_score", color="company_name", markers=True, title="تطور الدرجة النهائية عبر التقييمات المتعاقبة")
-        st.plotly_chart(fig_history, width="stretch")
+        st.plotly_chart(fig_history, use_container_width=True)
     else:
         st.info("لا توجد تقييمات محفوظة حتى الآن.")
