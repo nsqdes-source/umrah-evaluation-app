@@ -532,7 +532,7 @@ st.caption(f"نسخة محرك التقييم: {APP_VERSION}")
 tab1, tab2 = st.tabs(["📊 إجراء التقييم", "📜 سجل التقييمات التاريخية"])
 
 with tab1:
-    company_name = st.text_input("اسم الشركة / الرخصة:", "شركة عمرة النموذجية")
+    company_name = st.text_input("اسم الشركة / الرخصة:", "شركة تدبير الغربية")
     st.sidebar.header("⚙️ الخيارات والإعدادات")
     input_mode = st.sidebar.radio("طريقة إدخال البيانات:", ["إدخال يدوي", "استيراد Excel/CSV"])
     gemini_key = st.sidebar.text_input("مفتاح Gemini API - اختياري", type="password")
